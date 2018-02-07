@@ -25,7 +25,7 @@ class DDPGAgent(Agent):
     def __init__(self, nb_actions, actor, critic, critic_action_input, memory,
                  gamma=.99, batch_size=32, nb_steps_warmup_critic=1000, nb_steps_warmup_actor=1000,
                  train_interval=1, memory_interval=1, delta_range=None, delta_clip=np.inf,
-                 random_process=None, custom_model_objects={}, target_model_update=.001, **kwargs):
+                 random_process=None, custom_model_objects={}, target_model_update=.001,_am_epsilon=0, **kwargs):
         if hasattr(actor.output, '__len__') and len(actor.output) > 1:
             raise ValueError('Actor "{}" has more than one output. DDPG expects an actor that has a single output.'.format(actor))
         if hasattr(critic.output, '__len__') and len(critic.output) > 1:
@@ -63,6 +63,7 @@ class DDPGAgent(Agent):
         self.train_interval = train_interval
         self.memory_interval = memory_interval
         self.custom_model_objects = custom_model_objects
+        self._am_epsilon=_am_epsilon
 
         # Related objects.
         self.actor = actor
@@ -200,10 +201,19 @@ class DDPGAgent(Agent):
 
         # Apply noise, if a random process is set.
         if self.training and self.random_process is not None:
-            noise = self.random_process.sample()
-            assert noise.shape == action.shape
-            action += noise
-
+            #If _am_epsilon is non zero, select an action from the action space randomly with a probabiliy of _am_epsilon
+            if(self._am_epsilon>0):
+                if(self.step<=self.nb_steps_warmup_actor):
+                    action_eps = self.random_process.epsilon(action,1.0)
+                else:
+                    action_eps = self.random_process.epsilon(action,self._am_epsilon)
+                assert action_eps.shape == action.shape
+                action = action_eps
+            else:
+                noise = self.random_process.sample()
+                assert noise.shape == action.shape
+                action += noise
+            
         return action
 
     def forward(self, observation):
