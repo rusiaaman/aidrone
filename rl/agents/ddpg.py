@@ -11,7 +11,6 @@ from rl.core import Agent
 from rl.random import OrnsteinUhlenbeckProcess
 from rl.util import *
 
-
 def mean_q(y_true, y_pred):
     return K.mean(K.max(y_pred, axis=-1))
 
@@ -25,7 +24,7 @@ class DDPGAgent(Agent):
     def __init__(self, nb_actions, actor, critic, critic_action_input, memory,
                  gamma=.99, batch_size=32, nb_steps_warmup_critic=1000, nb_steps_warmup_actor=1000,
                  train_interval=1, memory_interval=1, delta_range=None, delta_clip=np.inf,
-                 random_process=None, custom_model_objects={}, target_model_update=.001,_am_epsilon=0, **kwargs):
+                 random_process=None, custom_model_objects={}, target_model_update=.001,_am_epsilon=0,parameter_random=False,exp_alpha=0.8, exp_delta=0.05,exp_sigma=0.1, **kwargs):
         if hasattr(actor.output, '__len__') and len(actor.output) > 1:
             raise ValueError('Actor "{}" has more than one output. DDPG expects an actor that has a single output.'.format(actor))
         if hasattr(critic.output, '__len__') and len(critic.output) > 1:
@@ -64,7 +63,10 @@ class DDPGAgent(Agent):
         self.memory_interval = memory_interval
         self.custom_model_objects = custom_model_objects
         self._am_epsilon=_am_epsilon
-
+        self.parameter_random=parameter_random
+        self.exp_alpha=exp_alpha
+        self.exp_delta=exp_delta
+        self.exp_sigma=exp_sigma
         # Related objects.
         self.actor = actor
         self.critic = critic
@@ -110,19 +112,29 @@ class DDPGAgent(Agent):
         self.target_actor.compile(optimizer='sgd', loss='mse')
         self.target_critic = clone_model(self.critic, self.custom_model_objects)
         self.target_critic.compile(optimizer='sgd', loss='mse')
-
+        
+            
         # We also compile the actor. We never optimize the actor using Keras but instead compute
         # the policy gradient ourselves. However, we need the actor in feed-forward mode, hence
         # we also compile it with any optimzer and
         self.actor.compile(optimizer='sgd', loss='mse')
-
+        
+        
         # Compile the critic.
         if self.target_model_update < 1.:
             # We use the `AdditionalUpdatesOptimizer` to efficiently soft-update the target model.
             critic_updates = get_soft_target_model_updates(self.target_critic, self.critic, self.target_model_update)
             critic_optimizer = AdditionalUpdatesOptimizer(critic_optimizer, critic_updates)
         self.critic.compile(optimizer=critic_optimizer, loss=clipped_error, metrics=critic_metrics)
-
+        
+        
+        #Do we want exploration using paramter noise addition
+        if(self.parameter_random):
+            self.exploring_actor = clone_model(self.actor, self.custom_model_objects)
+            self.target_actor.compile(optimizer='sgd', loss='mse')
+            self.exp_dist_i=0
+            self.update_exploring_actor()
+            
         # Combine actor and critic so that we can get the policy gradient.
         # Assuming critic's state inputs are the same as actor's.
         combined_inputs = []
@@ -196,12 +208,21 @@ class DDPGAgent(Agent):
 
     def select_action(self, state):
         batch = self.process_state_batch([state])
+        
+        if(self.parameter_random):
+                action=self.exploring_actor.predict_on_batch(batch).flatten()
+                assert action.shape == (self.nb_actions,)
+                unexp_action=self.actor.predict_on_batch(batch).flatten()
+                self.exp_dist_i=self.exp_dist_i+abs(unexp_action-action)
+                return action
+     
         action = self.actor.predict_on_batch(batch).flatten()
         assert action.shape == (self.nb_actions,)
 
         # Apply noise, if a random process is set.
         if self.training and self.random_process is not None:
             #If _am_epsilon is non zero, select an action from the action space randomly with a probabiliy of _am_epsilon
+
             if(self._am_epsilon>0):
                 if(self.step<=self.nb_steps_warmup_actor):
                     action_eps = self.random_process.epsilon(action,1.0)
@@ -320,9 +341,43 @@ class DDPGAgent(Agent):
                 if self.uses_learning_phase:
                     inputs += [self.training]
                 action_values = self.actor_train_fn(inputs)[0]
+                self.update_exploring_actor()
                 assert action_values.shape == (self.batch_size, self.nb_actions)
 
         if self.target_model_update >= 1 and self.step % self.target_model_update == 0:
             self.update_target_models_hard()
 
         return metrics
+    
+    def update_exploring_actor(self):
+        print("updating exploring actor with sigma = {}".format(self.exp_sigma))
+        self.exploring_actor.set_weights(self.actor.get_weights())
+        for layer in self.exploring_actor.layers:
+            if(layer.trainable):
+                layer_weights=layer.get_weights()
+                if(layer_weights==[]):
+                    continue
+                layer_weights[0]=layer_weights[0]+np.random.normal(0,self.exp_sigma,layer_weights[0].shape)
+                layer_weights[1]=layer_weights[1]+np.random.normal(0,self.exp_sigma,layer_weights[1].shape)
+                layer.set_weights(layer_weights)
+        return
+        
+    def update_exploring_critic(self,logs):
+        if(False==self.parameter_random):
+            return
+        #Re-initialize the exploring critic
+        steps=logs['nb_steps']
+        self.exp_dist_i=self.exp_dist_i/steps
+        self.exp_distance=np.sqrt(np.mean(self.exp_dist_i))
+        print('the distance = {} \n',format(self.exp_distance))
+        if(self.exp_distance<self.exp_delta):
+            self.exp_sigma=self.exp_sigma/self.exp_alpha
+        else:
+            self.exp_sigma=self.exp_sigma*self.exp_alpha
+        self.update_exploring_actor()
+        self.exp_dist_i=np.zeros(self.exp_dist_i.shape)
+        return
+    
+    def episode_end(self,logs):
+        self.update_exploring_critic(logs)
+        return

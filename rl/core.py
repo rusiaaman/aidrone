@@ -143,6 +143,16 @@ class Agent(object):
                         callbacks.on_action_end(action)
                         if done:
                             warnings.warn('Env ended before {} random steps could be performed at the start. You should probably lower the `nb_max_start_steps` parameter.'.format(nb_random_start_steps))
+                            if(self.episode_end is not None):
+                                assert episode_reward is not None
+                                assert episode_step is not None
+                                episode_logs = {
+                                    'episode_reward': episode_reward,
+                                    'nb_episode_steps': episode_step,
+                                    'nb_steps': self.step,
+                                }
+                                self.episode_end(episode_logs)
+                                
                             observation = deepcopy(env.reset())
                             if self.processor is not None:
                                 observation = self.processor.process_observation(observation)
@@ -213,7 +223,8 @@ class Agent(object):
                         'nb_steps': self.step,
                     }
                     callbacks.on_episode_end(episode, episode_logs)
-
+                    if(self.episode_end is not None):
+                        self.episode_end(episode_logs)        
                     episode += 1
                     observation = None
                     episode_step = None
